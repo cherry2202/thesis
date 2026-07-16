@@ -87,7 +87,7 @@ def train(args):
             lr_scheduler_type=args.lr_scheduler_type,
             logging_steps=args.logging_step,
             optim=args.optim,
-            evaluation_strategy=args.save_and_eval_strategy,
+            eval_strategy=args.save_and_eval_strategy,
             save_strategy=args.save_and_eval_strategy,
             eval_steps=args.save_and_eval_steps,
             save_steps=args.save_and_eval_steps,
@@ -97,9 +97,10 @@ def train(args):
             ddp_find_unused_parameters=False if ddp else None,
             eval_delay=1 if args.save_and_eval_strategy == "epoch" else 2000,
             remove_unused_columns=False,
-            report_to=[],
+            report_to="wandb",
+            run_name=args.wandb_run_name,
         ),
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=collator,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=20)]
     )

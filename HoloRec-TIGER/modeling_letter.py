@@ -17,6 +17,7 @@ class LETTER(T5ForConditionalGeneration):
         self.coarse_loss_weight = 1.0
         self.fine_loss_weight = 1.0
         self.coarse_align_weight = 2.0
+        self.model_parallel = False
 
         d_model = config.d_model
         vocab_size = config.vocab_size
