@@ -1,9 +1,12 @@
 export HF_ENDPOINT=https://hf-mirror.com
+
 DATASET=Beauty
 DATA_PATH=../data
-OUTPUT_DIR=./ckpt/$DATASET/
-RESULTS_FILE=./results/$DATASET/all-2ori.json
-CKPT_PATH=./ckpt/$DATASET/aux8_alpha2/checkpoint-6272/
+COARSE_DIM=8
+ALPHA=1
+EXP_MODEL=coarse${COARSE_DIM}_alpha${ALPHA}_1
+CKPT_PATH=./ckpt/$DATASET/${EXP_MODEL}/
+RESULTS_FILE=./results/${EXP_MODEL}/all-2ori.json
 
 # python test.py \
 #     --gpu_id 2 \
@@ -26,4 +29,4 @@ torchrun --nproc_per_node=4 --master_port=2300 test.py \
   --test_batch_size 32 \
   --num_beams 20 \
   --test_prompt_ids 0 \
-  --index_file .nq_sid_tw32_rqvae.json
+  --index_file .tw32.json

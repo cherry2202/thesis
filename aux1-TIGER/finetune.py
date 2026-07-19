@@ -143,11 +143,11 @@ def train(args):
             metric_for_best_model="eval_loss",  # <--- 【只加这一句】
             greater_is_better=False, # <-- 指标不是越大越好
             # deepspeed=args.deepspeed,
-            # ddp_find_unused_parameters=False if ddp else None,
-            ddp_find_unused_parameters=True,
+            ddp_find_unused_parameters=False if ddp else None,
+            # ddp_find_unused_parameters=True,
             prediction_loss_only=True,
             eval_accumulation_steps=2,
-            report_to=['tensorboard'],
+            report_to=['wandb'],
             logging_dir=os.path.join(args.output_dir, "tensorboard_logs"),
             eval_delay= 1 if args.save_and_eval_strategy=="epoch" else 2000,
             # dataloader_num_workers=args.num_workers,   # 新增
