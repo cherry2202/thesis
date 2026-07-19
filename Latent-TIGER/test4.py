@@ -142,7 +142,7 @@ def test(args):
                         metrics_results[m] += val
 
                     if local_rank == 0 and step % 50 == 0:
-                        temp = {m: metrics_results[m] / total, 4) for m in metrics}
+                        temp = {m: metrics_results[m] / total for m in metrics}
                         print(f"Step {step}, interim metric: {temp}")
 
                     # 每10步打印前3条样本的真实标签 + top5 beam预测
