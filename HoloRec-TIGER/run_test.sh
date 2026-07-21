@@ -17,4 +17,5 @@ torchrun --nproc_per_node=8 --master_port=2214 test.py \
   --save_pred_txt $SAVE_PRED_TXT \
   --test_prompt_ids 0 \
   --index_file .tw32.json \
-  --coarse_index_file .tw8.json
+  --coarse_index_file .tw8.json \
+  --coarse_guidance_weight 0.2
