@@ -91,6 +91,38 @@ def build_fine_trie_from_dataset(test_data, tokenizer: T5Tokenizer) -> Trie:
     return build_trie_from_token_sequences(fine_token_sequences, tokenizer)
 
 
+def build_fine_prefix_to_coarse_ids(test_data, tokenizer: T5Tokenizer) -> Dict[tuple, List[int]]:
+    """Map each fine-code prefix to compatible coarse token ids at the same step.
+
+    Your setting has two RQ-VAE codebooks for the same item: a coarse code from
+    the first 8 semantic-vector dimensions and a fine code from all 32
+    dimensions. During fine beam search, a partial fine prefix can correspond to
+    one or more items; this cache says which coarse token ids are compatible
+    with that partial fine prefix at the current decoding step.
+    """
+    prefix_to_coarse_ids = {}
+    for item_id, fine_tokens in test_data.indices.items():
+        coarse_tokens = test_data.coarse_indices[str(item_id)]
+        if len(fine_tokens) != len(coarse_tokens):
+            raise ValueError(
+                f"item {item_id} has fine/coarse length mismatch: "
+                f"{len(fine_tokens)} vs {len(coarse_tokens)}"
+            )
+
+        fine_ids = tokenizer.convert_tokens_to_ids(fine_tokens)
+        coarse_ids = tokenizer.convert_tokens_to_ids(coarse_tokens)
+        if isinstance(fine_ids, int):
+            fine_ids = [fine_ids]
+        if isinstance(coarse_ids, int):
+            coarse_ids = [coarse_ids]
+
+        for step_idx in range(len(fine_ids)):
+            key = (step_idx, tuple(fine_ids[: step_idx + 1]))
+            prefix_to_coarse_ids.setdefault(key, set()).add(coarse_ids[step_idx])
+
+    return {key: sorted(value) for key, value in prefix_to_coarse_ids.items()}
+
+
 def normalize_code_text(x: str) -> str:
     return str(x).strip().replace(" ", "")
 
@@ -227,12 +259,16 @@ def batch_generate_interleaved_ultra(
     fine_code_len: int,
     num_beams: int,
     use_coarse_score_in_rank: bool = False,
+    fine_prefix_to_coarse_ids: Optional[Dict[tuple, List[int]]] = None,
+    coarse_guidance_weight: float = 0.0,
 ):
     """
     batch-level beam search:
     - coarse 仅做 latent
     - fine 做真实搜索
     - trie 只约束 fine prefix
+    - optional coarse guidance adds log P(coarse_token(item) | history, prefix)
+      to each fine-token expansion score
     """
     device = inputs["input_ids"].device
     input_ids = inputs["input_ids"]
@@ -318,12 +354,24 @@ def batch_generate_interleaved_ultra(
         flat_enc_h = enc_h0.index_select(0, flat_sample_ids_t)
         flat_enc_m = enc_m0.index_select(0, flat_sample_ids_t)
 
-        # 1) coarse latent step
-        coarse_emb, coarse_scores = predict_coarse_soft_batch(
-            model=model,
-            last_hidden=flat_last_hidden,
-            use_coarse_score=use_coarse_score_in_rank,
-        )
+        # 1) coarse latent step.  Besides the soft latent embedding, keep the
+        # full coarse log-probability distribution so fine candidates can be
+        # scored by their own compatible coarse code instead of the old max-only
+        # confidence heuristic.
+        coarse_logits = model.coarse_head(flat_last_hidden)
+        temp = getattr(model, "temperature", 1.0)
+        coarse_probs = F.softmax(coarse_logits / temp, dim=-1)
+        coarse_emb = torch.matmul(coarse_probs, model.shared.weight)
+        coarse_log_probs = F.log_softmax(coarse_logits, dim=-1)
+
+        if use_coarse_score_in_rank:
+            coarse_scores = coarse_log_probs.max(dim=-1).values
+        else:
+            coarse_scores = torch.zeros(
+                flat_last_hidden.size(0),
+                dtype=flat_last_hidden.dtype,
+                device=device
+            )
 
         hidden_after_coarse, past_after_coarse = decoder_step(
             model=model,
@@ -377,11 +425,21 @@ def batch_generate_interleaved_ultra(
                 fine_token_id = int(topk_ids[j].item())
                 fine_logprob = float(topk_scores[j].item())
 
+                new_fine_prefix = beam["fine_token_ids"] + [fine_token_id]
+                guided_score = 0.0
+                if fine_prefix_to_coarse_ids is not None and coarse_guidance_weight > 0:
+                    compatible_coarse = fine_prefix_to_coarse_ids.get((step_idx, tuple(new_fine_prefix)), [])
+                    if compatible_coarse:
+                        compatible_tensor = torch.tensor(compatible_coarse, dtype=torch.long, device=device)
+                        guided_score = float(
+                            coarse_log_probs[flat_idx].index_select(0, compatible_tensor).max().item()
+                        )
+
                 candidate_parent_flat_idx.append(flat_idx)
                 candidate_sample_ids.append(sample_id)
                 candidate_token_ids.append(fine_token_id)
-                candidate_scores.append(base_score + coarse_score + fine_logprob)
-                candidate_fine_prefixes.append(beam["fine_token_ids"] + [fine_token_id])
+                candidate_scores.append(base_score + coarse_score + fine_logprob + coarse_guidance_weight * guided_score)
+                candidate_fine_prefixes.append(new_fine_prefix)
 
         if len(candidate_token_ids) == 0:
             break
@@ -530,6 +588,7 @@ def test(args):
     collator = TestCollator(args, tokenizer)
 
     fine_trie = build_fine_trie_from_dataset(test_data, tokenizer)
+    fine_prefix_to_coarse_ids = build_fine_prefix_to_coarse_ids(test_data, tokenizer)
     fine_code_len = infer_fine_code_length(test_data)
     all_items = [fine_codes_to_text(v) for v in test_data.indices.values()]
 
@@ -600,6 +659,8 @@ def test(args):
                             fine_code_len=fine_code_len,
                             num_beams=args.num_beams,
                             use_coarse_score_in_rank=getattr(args, "use_coarse_score_in_rank", False),
+                            fine_prefix_to_coarse_ids=fine_prefix_to_coarse_ids,
+                            coarse_guidance_weight=getattr(args, "coarse_guidance_weight", 0.0),
                         )
                 else:
                     decoded, scores = batch_generate_interleaved_ultra(
@@ -610,6 +671,8 @@ def test(args):
                         fine_code_len=fine_code_len,
                         num_beams=args.num_beams,
                         use_coarse_score_in_rank=getattr(args, "use_coarse_score_in_rank", False),
+                        fine_prefix_to_coarse_ids=fine_prefix_to_coarse_ids,
+                        coarse_guidance_weight=getattr(args, "coarse_guidance_weight", 0.0),
                     )
 
                 for i, tgt in enumerate(target_texts):
@@ -724,6 +787,15 @@ if __name__ == "__main__":
         "--use_coarse_score_in_rank",
         action="store_true",
         help="Whether to include coarse max-logprob into beam score."
+    )
+    parser.add_argument(
+        "--coarse_guidance_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for item-aware coarse guidance during fine beam expansion. "
+            "Set to 0 to disable; try 0.1-0.5 first."
+        )
     )
     parser.add_argument(
         "--use_fp16",
